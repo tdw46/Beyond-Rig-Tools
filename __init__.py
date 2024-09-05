@@ -17,9 +17,18 @@ bl_info = {
 def load_json_file(file_name):
     addon_dir = os.path.dirname(__file__)
     file_path = os.path.join(addon_dir, file_name)
-    with open(file_path, "r") as file:
-        data = json.load(file)
-    return data
+    try:
+        with open(file_path, "r") as file:
+            data = json.load(file)
+        return data
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON: {e}")
+        return {}
+    except RecursionError:
+        print(
+            "RecursionError: JSON file is too deeply nested. Please check the structure of your bone_mappings.json file."
+        )
+        return {}
 
 
 def get_bone_mapping(source, target):
@@ -175,8 +184,12 @@ def rig_converter_target_items(self, context):
 
     active_object = context.active_object
     if active_object and active_object.type == "ARMATURE":
-        current_rig_type = detect_rig_type(active_object.data)
-        return [item for item in items if item[0] != current_rig_type]
+        try:
+            current_rig_type = detect_rig_type(active_object.data)
+            return [item for item in items if item[0] != current_rig_type]
+        except Exception as e:
+            print(f"Error detecting rig type: {e}")
+            return items
     return [("NONE", "None", "No conversion")]
 
 
@@ -192,14 +205,17 @@ def draw_rig_converter(self, context):
     row.enabled = scene.rig_converter_target != "NONE"
 
 
+def update_rig_converter_target(self, context):
+    # This function is intentionally left empty to avoid the infinite recursion error
+    pass
+
+
 def register():
     bpy.utils.register_class(RigConverter)
     bpy.types.Scene.rig_converter_target = bpy.props.EnumProperty(
         name="Convert To",
         items=rig_converter_target_items,
-        update=lambda self, context: setattr(
-            context.scene, "rig_converter_target", context.scene.rig_converter_target
-        ),
+        update=update_rig_converter_target,
     )
     bpy.types.DATA_PT_bone_collections.prepend(draw_rig_converter)
 
