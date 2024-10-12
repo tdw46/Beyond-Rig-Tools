@@ -1,9 +1,10 @@
 import bpy
 import json
 import os
+import mathutils
 
 bl_info = {
-    "name": "Beyond Rig Converter",
+    "name": "Beyond Rig Tools",
     "author": "Tyler Walker (Beyond Dev)",
     "version": (0, 8),
     "blender": (2, 80, 0),
@@ -174,6 +175,115 @@ class RigConverter(bpy.types.Operator):
         bpy.ops.object.mode_set(mode="OBJECT")
 
 
+class MatchRigPose(bpy.types.Operator):
+    bl_idname = "object.match_rig_pose"
+    bl_label = "Match Rig Pose"
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.selected_objects) == 2 and all(
+            obj.type == "ARMATURE" for obj in context.selected_objects
+        )
+
+    def execute(self, context):
+        active_obj = context.active_object
+        target_obj = next(
+            (obj for obj in context.selected_objects if obj != active_obj), None
+        )
+
+        if not active_obj or active_obj.type != "ARMATURE" or not target_obj:
+            self.report({"ERROR"}, "Please select two armatures")
+            return {"CANCELLED"}
+
+        print(f"Active object: {active_obj.name}")
+        print(f"Target object: {target_obj.name}")
+
+        # Calculate the offset between the two armatures
+        armature_offset = (
+            active_obj.matrix_world.translation - target_obj.matrix_world.translation
+        )
+
+        def align_single_bone(bone_name):
+            if (
+                bone_name not in active_obj.pose.bones
+                or bone_name not in target_obj.pose.bones
+            ):
+                print(f"Bone {bone_name} not found in both armatures. Skipping.")
+                return
+
+            # Select the bone
+            bpy.ops.pose.select_all(action="DESELECT")
+            active_obj.data.bones[bone_name].select = True
+            active_obj.data.bones.active = active_obj.data.bones[bone_name]
+
+            active_pose_bone = active_obj.pose.bones[bone_name]
+            target_pose_bone = target_obj.pose.bones[bone_name]
+
+            print(f"Aligning bone: {bone_name}")
+
+            try:
+                # Get the world space matrices for both bones
+                target_world_matrix = target_obj.matrix_world @ target_pose_bone.matrix
+                active_world_matrix = active_obj.matrix_world @ active_pose_bone.matrix
+
+                # Apply the armature offset to the target world matrix
+                target_world_matrix.translation += armature_offset
+
+                # Calculate the difference in world space
+                world_diff = target_world_matrix @ active_world_matrix.inverted()
+
+                # Convert the world difference to local space of the active armature
+                local_diff = (
+                    active_obj.matrix_world.inverted()
+                    @ world_diff
+                    @ active_obj.matrix_world
+                )
+
+                # Apply the local difference to the active pose bone
+                active_pose_bone.matrix = local_diff @ active_pose_bone.matrix
+
+                # Calculate and apply the roll
+                target_y_axis = (
+                    target_world_matrix.to_3x3() @ mathutils.Vector((0, 1, 0))
+                ).normalized()
+                active_y_axis = (
+                    active_world_matrix.to_3x3() @ mathutils.Vector((0, 1, 0))
+                ).normalized()
+
+                roll_quat = target_y_axis.rotation_difference(active_y_axis)
+
+                # Apply the roll rotation
+                # Uncomment the following lines if you want to apply the roll
+                # active_pose_bone.rotation_mode = 'QUATERNION'
+                # active_pose_bone.rotation_quaternion = roll_quat @ active_pose_bone.rotation_quaternion
+
+                # Update the view to ensure changes are applied
+                context.view_layer.update()
+
+            except Exception as e:
+                print(f"Error aligning bone {bone_name}: {str(e)}")
+
+        def align_bone_chain(bone):
+            align_single_bone(bone.name)
+
+            # Align all children recursively
+            for child in bone.children:
+                align_bone_chain(child)
+
+        def align_armature():
+            # Start with all root bones
+            root_bones = [bone for bone in active_obj.data.bones if not bone.parent]
+            for root_bone in root_bones:
+                align_bone_chain(root_bone)
+
+        # Align the entire armature
+        align_armature()
+
+        print("All bones aligned")
+        self.report({"INFO"}, "Rig pose matched successfully")
+        return {"FINISHED"}
+
+
 def rig_converter_target_items(self, context):
     items = [
         ("NONE", "None", "No conversion"),
@@ -204,6 +314,9 @@ def draw_rig_converter(self, context):
     row.operator("object.rig_converter")
     row.enabled = scene.rig_converter_target != "NONE"
 
+    row = layout.row()
+    row.operator("object.match_rig_pose")
+
 
 def update_rig_converter_target(self, context):
     # This function is intentionally left empty to avoid the infinite recursion error
@@ -212,6 +325,7 @@ def update_rig_converter_target(self, context):
 
 def register():
     bpy.utils.register_class(RigConverter)
+    bpy.utils.register_class(MatchRigPose)
     bpy.types.Scene.rig_converter_target = bpy.props.EnumProperty(
         name="Convert To",
         items=rig_converter_target_items,
@@ -222,6 +336,7 @@ def register():
 
 def unregister():
     bpy.utils.unregister_class(RigConverter)
+    bpy.utils.unregister_class(MatchRigPose)
     del bpy.types.Scene.rig_converter_target
     bpy.types.DATA_PT_bone_collections.remove(draw_rig_converter)
 
