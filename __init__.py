@@ -3,13 +3,15 @@ import json
 import os
 import mathutils
 
+import blf
+
 bl_info = {
     "name": "Beyond Rig Tools",
     "author": "Tyler Walker (Beyond Dev)",
-    "version": (0, 8),
+    "version": (1, 0),
     "blender": (2, 80, 0),
-    "location": "Properties > Data > Bone Collections",
-    "description": "Convert rig between VROID, Mixamo, and Move-One hierarchies",
+    "location": "Properties > Data > Armature",
+    "description": "Tools for rig conversion and pose matching",
     "warning": "",
     "category": "Rigging",
 }
@@ -181,32 +183,42 @@ class MatchRigPose(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return len(context.selected_objects) == 2 and all(
-            obj.type == "ARMATURE" for obj in context.selected_objects
+        return (
+            context.scene.source_armature
+            and context.active_object
+            and context.active_object.type == "ARMATURE"
+            and context.active_object != context.scene.source_armature
         )
 
     def execute(self, context):
         active_obj = context.active_object
-        target_obj = next(
-            (obj for obj in context.selected_objects if obj != active_obj), None
-        )
+        source_obj = context.scene.source_armature
 
-        if not active_obj or active_obj.type != "ARMATURE" or not target_obj:
-            self.report({"ERROR"}, "Please select two armatures")
+        if not active_obj or active_obj.type != "ARMATURE" or not source_obj:
+            self.report(
+                {"ERROR"},
+                "Please select a source armature and ensure the active object is a different armature",
+            )
             return {"CANCELLED"}
 
         print(f"Active object: {active_obj.name}")
-        print(f"Target object: {target_obj.name}")
+        print(f"Source object: {source_obj.name}")
+
+        # Store the current mode
+        original_mode = active_obj.mode
+
+        # Switch to pose mode
+        bpy.ops.object.mode_set(mode="POSE")
 
         # Calculate the offset between the two armatures
         armature_offset = (
-            active_obj.matrix_world.translation - target_obj.matrix_world.translation
+            active_obj.matrix_world.translation - source_obj.matrix_world.translation
         )
 
         def align_single_bone(bone_name):
             if (
                 bone_name not in active_obj.pose.bones
-                or bone_name not in target_obj.pose.bones
+                or bone_name not in source_obj.pose.bones
             ):
                 print(f"Bone {bone_name} not found in both armatures. Skipping.")
                 return
@@ -217,20 +229,20 @@ class MatchRigPose(bpy.types.Operator):
             active_obj.data.bones.active = active_obj.data.bones[bone_name]
 
             active_pose_bone = active_obj.pose.bones[bone_name]
-            target_pose_bone = target_obj.pose.bones[bone_name]
+            source_pose_bone = source_obj.pose.bones[bone_name]
 
             print(f"Aligning bone: {bone_name}")
 
             try:
                 # Get the world space matrices for both bones
-                target_world_matrix = target_obj.matrix_world @ target_pose_bone.matrix
+                source_world_matrix = source_obj.matrix_world @ source_pose_bone.matrix
                 active_world_matrix = active_obj.matrix_world @ active_pose_bone.matrix
 
-                # Apply the armature offset to the target world matrix
-                target_world_matrix.translation += armature_offset
+                # Apply the armature offset to the source world matrix
+                source_world_matrix.translation += armature_offset
 
                 # Calculate the difference in world space
-                world_diff = target_world_matrix @ active_world_matrix.inverted()
+                world_diff = source_world_matrix @ active_world_matrix.inverted()
 
                 # Convert the world difference to local space of the active armature
                 local_diff = (
@@ -243,14 +255,14 @@ class MatchRigPose(bpy.types.Operator):
                 active_pose_bone.matrix = local_diff @ active_pose_bone.matrix
 
                 # Calculate and apply the roll
-                target_y_axis = (
-                    target_world_matrix.to_3x3() @ mathutils.Vector((0, 1, 0))
+                source_y_axis = (
+                    source_world_matrix.to_3x3() @ mathutils.Vector((0, 1, 0))
                 ).normalized()
                 active_y_axis = (
                     active_world_matrix.to_3x3() @ mathutils.Vector((0, 1, 0))
                 ).normalized()
 
-                roll_quat = target_y_axis.rotation_difference(active_y_axis)
+                roll_quat = source_y_axis.rotation_difference(active_y_axis)
 
                 # Apply the roll rotation
                 # Uncomment the following lines if you want to apply the roll
@@ -280,6 +292,10 @@ class MatchRigPose(bpy.types.Operator):
         align_armature()
 
         print("All bones aligned")
+
+        # Return to the original mode
+        bpy.ops.object.mode_set(mode=original_mode)
+
         self.report({"INFO"}, "Rig pose matched successfully")
         return {"FINISHED"}
 
@@ -303,19 +319,102 @@ def rig_converter_target_items(self, context):
     return [("NONE", "None", "No conversion")]
 
 
-def draw_rig_converter(self, context):
+def armature_enum_items(self, context):
+    return [
+        (obj.name, obj.name, "")
+        for obj in bpy.data.objects
+        if obj.type == "ARMATURE" and obj != context.active_object
+    ]
+
+
+def get_text_dimensions(text, font_id=0, font_size=11):
+    blf.size(font_id, font_size)
+    return blf.dimensions(font_id, text)
+
+
+def wrap_text(text, max_width):
+    words = text.split()
+    lines = []
+    current_line = []
+    current_width = 0
+
+    for word in words:
+        word_width, _ = get_text_dimensions(word + " ")
+        if current_width + word_width <= max_width:
+            current_line.append(word)
+            current_width += word_width
+        else:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+            current_width = word_width
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return lines
+
+
+def draw_wrapped_text(layout, text, max_width):
+    wrapped_lines = wrap_text(text, max_width)
+    for line in wrapped_lines:
+        layout.label(text=line)
+
+
+def draw_beyond_rig_tools(self, context):
     layout = self.layout
     scene = context.scene
 
-    row = layout.row()
-    row.prop(scene, "rig_converter_target")
+    # Beyond Rig Converter section
+    box = layout.box()
+    row = box.row()
+    row.prop(
+        scene,
+        "beyond_rig_converter_expand",
+        icon="TRIA_DOWN" if scene.beyond_rig_converter_expand else "TRIA_RIGHT",
+        icon_only=True,
+        emboss=False,
+    )
+    row.label(text="Beyond Rig Converter")
 
-    row = layout.row()
-    row.operator("object.rig_converter")
-    row.enabled = scene.rig_converter_target != "NONE"
+    if scene.beyond_rig_converter_expand:
+        row = box.row()
+        row.prop(scene, "rig_converter_target")
 
-    row = layout.row()
-    row.operator("object.match_rig_pose")
+        row = box.row()
+        row.operator("object.rig_converter")
+        row.enabled = scene.rig_converter_target != "NONE"
+
+    # Beyond Rig Tools section
+    box = layout.box()
+    row = box.row()
+    row.prop(
+        scene,
+        "beyond_rig_tools_expand",
+        icon="TRIA_DOWN" if scene.beyond_rig_tools_expand else "TRIA_RIGHT",
+        icon_only=True,
+        emboss=False,
+    )
+
+    row.label(text="Match Poses Between Rigs")
+
+    if scene.beyond_rig_tools_expand:
+        # New nested box for pose matching
+        pose_match_box = box.box()
+
+        # Get the width of the pose_match_box
+        region = context.region
+        scale = context.preferences.view.ui_scale
+        available_width = region.width / scale - 40  # Subtracting some padding
+
+        # Draw the wrapped text
+        text = "Match poses across rigs with matching bones but different bind poses."
+        draw_wrapped_text(pose_match_box.column(), text, available_width)
+
+        row = pose_match_box.row()
+        row.prop(scene, "source_armature", icon="ARMATURE_DATA")
+
+        row = pose_match_box.row()
+        row.operator("object.match_rig_pose")
 
 
 def update_rig_converter_target(self, context):
@@ -326,19 +425,38 @@ def update_rig_converter_target(self, context):
 def register():
     bpy.utils.register_class(RigConverter)
     bpy.utils.register_class(MatchRigPose)
+
     bpy.types.Scene.rig_converter_target = bpy.props.EnumProperty(
         name="Convert To",
         items=rig_converter_target_items,
         update=update_rig_converter_target,
     )
-    bpy.types.DATA_PT_bone_collections.prepend(draw_rig_converter)
+    bpy.types.Scene.beyond_rig_converter_expand = bpy.props.BoolProperty(
+        name="Expand Beyond Rig Converter", default=False
+    )
+    bpy.types.Scene.beyond_rig_tools_expand = bpy.props.BoolProperty(
+        name="Expand Beyond Rig Tools", default=False
+    )
+    bpy.types.Scene.source_armature = bpy.props.PointerProperty(
+        name="Source Armature",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == "ARMATURE",
+    )
+
+    # Prepend the draw function to the armature properties panel
+    bpy.types.DATA_PT_bone_collections.prepend(draw_beyond_rig_tools)
 
 
 def unregister():
     bpy.utils.unregister_class(RigConverter)
     bpy.utils.unregister_class(MatchRigPose)
+
     del bpy.types.Scene.rig_converter_target
-    bpy.types.DATA_PT_bone_collections.remove(draw_rig_converter)
+    del bpy.types.Scene.beyond_rig_converter_expand
+    del bpy.types.Scene.beyond_rig_tools_expand
+
+    # Remove the draw function from the armature properties panel
+    bpy.types.DATA_PT_bone_collections.remove(draw_beyond_rig_tools)
 
 
 if __name__ == "__main__":
