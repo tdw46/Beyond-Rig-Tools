@@ -364,57 +364,68 @@ def draw_beyond_rig_tools(self, context):
     layout = self.layout
     scene = context.scene
 
-    # Beyond Rig Converter section
-    box = layout.box()
-    row = box.row()
-    row.prop(
+    # Main Beyond Rig Tools section
+    main_box = layout.box()
+    main_row = main_box.row()
+    main_row.prop(
         scene,
-        "beyond_rig_converter_expand",
-        icon="TRIA_DOWN" if scene.beyond_rig_converter_expand else "TRIA_RIGHT",
+        "beyond_rig_tools_main_expand",
+        icon="TRIA_DOWN" if scene.beyond_rig_tools_main_expand else "TRIA_RIGHT",
         icon_only=True,
         emboss=False,
     )
-    row.label(text="Beyond Rig Converter")
+    main_row.label(text="Beyond Rig Tools")
 
-    if scene.beyond_rig_converter_expand:
-        row = box.row()
-        row.prop(scene, "rig_converter_target")
+    if scene.beyond_rig_tools_main_expand:
+        # Beyond Rig Converter section
+        converter_box = main_box.box()
+        converter_row = converter_box.row()
+        converter_row.prop(
+            scene,
+            "beyond_rig_converter_expand",
+            icon="TRIA_DOWN" if scene.beyond_rig_converter_expand else "TRIA_RIGHT",
+            icon_only=True,
+            emboss=False,
+        )
+        converter_row.label(text="Beyond Rig Converter")
 
-        row = box.row()
-        row.operator("object.rig_converter")
-        row.enabled = scene.rig_converter_target != "NONE"
+        if scene.beyond_rig_converter_expand:
+            row = converter_box.row()
+            row.prop(scene, "rig_converter_target")
 
-    # Beyond Rig Tools section
-    box = layout.box()
-    row = box.row()
-    row.prop(
-        scene,
-        "beyond_rig_tools_expand",
-        icon="TRIA_DOWN" if scene.beyond_rig_tools_expand else "TRIA_RIGHT",
-        icon_only=True,
-        emboss=False,
-    )
+            row = converter_box.row()
+            row.operator("object.rig_converter")
+            row.enabled = scene.rig_converter_target != "NONE"
 
-    row.label(text="Match Poses Between Rigs")
+        # Beyond Rig Tools section (Pose Matching)
+        tools_box = main_box.box()
+        tools_row = tools_box.row()
+        tools_row.prop(
+            scene,
+            "beyond_rig_tools_expand",
+            icon="TRIA_DOWN" if scene.beyond_rig_tools_expand else "TRIA_RIGHT",
+            icon_only=True,
+            emboss=False,
+        )
 
-    if scene.beyond_rig_tools_expand:
-        # New nested box for pose matching
-        pose_match_box = box.box()
-
-        # Get the width of the pose_match_box
+        # Get the width of the tools_box
         region = context.region
         scale = context.preferences.view.ui_scale
         available_width = region.width / scale - 40  # Subtracting some padding
 
+        # Create a column for the wrapped text
+        text_column = tools_row.column()
+
         # Draw the wrapped text
         text = "Match poses across rigs with matching bones but different bind poses."
-        draw_wrapped_text(pose_match_box.column(), text, available_width)
+        draw_wrapped_text(text_column, text, available_width)
 
-        row = pose_match_box.row()
-        row.prop(scene, "source_armature", icon="ARMATURE_DATA")
+        if scene.beyond_rig_tools_expand:
+            row = tools_box.row()
+            row.prop(scene, "source_armature", icon="ARMATURE_DATA")
 
-        row = pose_match_box.row()
-        row.operator("object.match_rig_pose")
+            row = tools_box.row()
+            row.operator("object.match_rig_pose")
 
 
 def update_rig_converter_target(self, context):
@@ -426,16 +437,26 @@ def register():
     bpy.utils.register_class(RigConverter)
     bpy.utils.register_class(MatchRigPose)
 
+    bpy.types.Scene.beyond_rig_tools_main_expand = bpy.props.BoolProperty(
+        name="Expand Beyond Rig Tools",
+        description="Expand or collapse the Beyond Rig Tools section",
+        default=False,
+    )
+    bpy.types.Scene.beyond_rig_converter_expand = bpy.props.BoolProperty(
+        name="Expand Beyond Rig Converter",
+        description="Expand or collapse the Beyond Rig Converter section",
+        default=False,
+    )
+    bpy.types.Scene.beyond_rig_tools_expand = bpy.props.BoolProperty(
+        name="Expand Beyond Rig Tools",
+        description="Expand or collapse the Beyond Rig Tools section",
+        default=False,
+    )
+
     bpy.types.Scene.rig_converter_target = bpy.props.EnumProperty(
         name="Convert To",
         items=rig_converter_target_items,
         update=update_rig_converter_target,
-    )
-    bpy.types.Scene.beyond_rig_converter_expand = bpy.props.BoolProperty(
-        name="Expand Beyond Rig Converter", default=False
-    )
-    bpy.types.Scene.beyond_rig_tools_expand = bpy.props.BoolProperty(
-        name="Expand Beyond Rig Tools", default=False
     )
     bpy.types.Scene.source_armature = bpy.props.PointerProperty(
         name="Source Armature",
@@ -452,6 +473,7 @@ def unregister():
     bpy.utils.unregister_class(MatchRigPose)
 
     del bpy.types.Scene.rig_converter_target
+    del bpy.types.Scene.beyond_rig_tools_main_expand
     del bpy.types.Scene.beyond_rig_converter_expand
     del bpy.types.Scene.beyond_rig_tools_expand
 
