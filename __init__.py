@@ -8,7 +8,7 @@ import blf
 bl_info = {
     "name": "Beyond Rig Tools",
     "author": "Tyler Walker (Beyond Dev)",
-    "version": (1, 0),
+    "version": (1, 1, 0),
     "blender": (2, 80, 0),
     "location": "Properties > Data > Armature",
     "description": "Tools for rig conversion and pose matching",
@@ -300,6 +300,135 @@ class MatchRigPose(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# BEGIN INTEGRATION OF NEW OPERATOR AND UI (FROM SNIPPET)
+
+
+class ACTIONS_OT_Item(bpy.types.PropertyGroup):
+    action_name: bpy.props.StringProperty()
+
+
+class ACTIONS_UL_actions_list(bpy.types.UIList):
+    def draw_item(
+        self, context, layout, data, item, icon, active_data, active_propname, index
+    ):
+        row = layout.row()
+        split = row.split(factor=0.8)
+        split.prop_search(item, "action_name", bpy.data, "actions", text="")
+
+
+class ACTIONS_OT_add_action(bpy.types.Operator):
+    bl_idname = "actions_list.add_action"
+    bl_label = "Add Action"
+    bl_description = "Add a new action to the list"
+
+    def execute(self, context):
+        wm = context.window_manager
+        new_item = wm.action_items.add()
+        wm.action_index = len(wm.action_items) - 1
+        return {"FINISHED"}
+
+
+class ACTIONS_OT_remove_action(bpy.types.Operator):
+    bl_idname = "actions_list.remove_action"
+    bl_label = "Remove Action"
+    bl_description = "Remove the selected action from the list"
+
+    def execute(self, context):
+        wm = context.window_manager
+        if 0 <= wm.action_index < len(wm.action_items):
+            wm.action_items.remove(wm.action_index)
+            wm.action_index = min(wm.action_index, len(wm.action_items) - 1)
+        return {"FINISHED"}
+
+
+class OBJECT_OT_apply_armature_transforms_normalize_fcurves(bpy.types.Operator):
+    bl_idname = "object.adjust_armature_and_fcurves"
+    bl_label = "Apply Armature Transforms and Normalize F-Curves"
+    bl_description = "Apply rotation/location/scale to an armature and adjust location fcurves accordingly"
+
+    apply_location: bpy.props.BoolProperty(name="Apply Location", default=True)
+    apply_rotation: bpy.props.BoolProperty(name="Apply Rotation", default=True)
+    apply_scale: bpy.props.BoolProperty(name="Apply Scale", default=True)
+
+    def invoke(self, context, event):
+        obj = context.object
+        if not obj or obj.type != "ARMATURE":
+            self.report({"WARNING"}, "Active object is not an armature.")
+            return {"CANCELLED"}
+
+        wm = context.window_manager
+        wm.action_items.clear()
+
+        if obj.animation_data and obj.animation_data.action:
+            item = wm.action_items.add()
+            item.action_name = obj.animation_data.action.name
+            wm.action_index = 0
+
+        # Make the popup a bit more compact
+        return context.window_manager.invoke_props_dialog(self, width=300)
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+
+        layout.prop(self, "apply_location")
+        layout.prop(self, "apply_rotation")
+        layout.prop(self, "apply_scale")
+
+        layout.label(text="Actions to Adjust:")
+        row = layout.row()
+        row.template_list(
+            "ACTIONS_UL_actions_list", "", wm, "action_items", wm, "action_index"
+        )
+
+        col = row.column(align=True)
+        col.operator("actions_list.add_action", icon="ADD", text="")
+        col.operator("actions_list.remove_action", icon="REMOVE", text="")
+
+    def execute(self, context):
+        obj = context.object
+        wm = context.window_manager
+        if obj is None or obj.type != "ARMATURE":
+            self.report({"ERROR"}, "Active object is not an armature.")
+            return {"CANCELLED"}
+
+        scale_factor = 1.0
+        if self.apply_scale:
+            s = (obj.scale[0] + obj.scale[1] + obj.scale[2]) / 3.0
+            scale_factor = s if s != 0 else 1.0
+
+        if context.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        bpy.ops.object.transform_apply(
+            location=self.apply_location,
+            rotation=self.apply_rotation,
+            scale=self.apply_scale,
+        )
+
+        if self.apply_scale and abs(scale_factor - 1.0) > 1e-8:
+            for entry in wm.action_items:
+                action = bpy.data.actions.get(entry.action_name)
+                if action:
+                    for fcu in action.fcurves:
+                        if "location" in fcu.data_path:
+                            for kp in fcu.keyframe_points:
+                                kp.co[1] *= scale_factor
+                                kp.handle_left[1] *= scale_factor
+                                kp.handle_right[1] *= scale_factor
+            bpy.context.view_layer.update()
+
+        self.report({"INFO"}, "Transforms applied and fcurves adjusted.")
+        return {"FINISHED"}
+
+
+# END INTEGRATION OF NEW OPERATOR AND UI (FROM SNIPPET)
+
+
 def rig_converter_target_items(self, context):
     items = [
         ("NONE", "None", "No conversion"),
@@ -427,6 +556,22 @@ def draw_beyond_rig_tools(self, context):
             row = tools_box.row()
             row.operator("object.match_rig_pose")
 
+        # NEW "Utilities" SECTION
+        utilities_box = main_box.box()
+        utilities_row = utilities_box.row()
+        utilities_row.prop(
+            scene,
+            "beyond_rig_utilities_expand",
+            icon="TRIA_DOWN" if scene.beyond_rig_utilities_expand else "TRIA_RIGHT",
+            icon_only=True,
+            emboss=False,
+        )
+        utilities_row.label(text="Utilities")
+
+        if scene.beyond_rig_utilities_expand:
+            row = utilities_box.row()
+            row.operator("object.adjust_armature_and_fcurves")
+
 
 def update_rig_converter_target(self, context):
     # This function is intentionally left empty to avoid the infinite recursion error
@@ -436,6 +581,18 @@ def update_rig_converter_target(self, context):
 def register():
     bpy.utils.register_class(RigConverter)
     bpy.utils.register_class(MatchRigPose)
+
+    # REGISTER NEW CLASSES FROM THE SNIPPET
+    bpy.utils.register_class(ACTIONS_OT_Item)
+    bpy.utils.register_class(ACTIONS_UL_actions_list)
+    bpy.utils.register_class(ACTIONS_OT_add_action)
+    bpy.utils.register_class(ACTIONS_OT_remove_action)
+    bpy.utils.register_class(OBJECT_OT_apply_armature_transforms_normalize_fcurves)
+
+    bpy.types.WindowManager.action_items = bpy.props.CollectionProperty(
+        type=ACTIONS_OT_Item
+    )
+    bpy.types.WindowManager.action_index = bpy.props.IntProperty()
 
     bpy.types.Scene.beyond_rig_tools_main_expand = bpy.props.BoolProperty(
         name="Expand Beyond Rig Tools",
@@ -450,6 +607,13 @@ def register():
     bpy.types.Scene.beyond_rig_tools_expand = bpy.props.BoolProperty(
         name="Expand Beyond Rig Tools",
         description="Expand or collapse the Beyond Rig Tools section",
+        default=False,
+    )
+
+    # NEW PROPERTY FOR UTILITIES EXPANSION
+    bpy.types.Scene.beyond_rig_utilities_expand = bpy.props.BoolProperty(
+        name="Expand Utilities",
+        description="Expand or collapse the Utilities section",
         default=False,
     )
 
@@ -469,16 +633,25 @@ def register():
 
 
 def unregister():
-    bpy.utils.unregister_class(RigConverter)
-    bpy.utils.unregister_class(MatchRigPose)
+    del bpy.types.WindowManager.action_items
+    del bpy.types.WindowManager.action_index
 
     del bpy.types.Scene.rig_converter_target
     del bpy.types.Scene.beyond_rig_tools_main_expand
     del bpy.types.Scene.beyond_rig_converter_expand
     del bpy.types.Scene.beyond_rig_tools_expand
+    del bpy.types.Scene.beyond_rig_utilities_expand
 
     # Remove the draw function from the armature properties panel
     bpy.types.DATA_PT_bone_collections.remove(draw_beyond_rig_tools)
+
+    bpy.utils.unregister_class(OBJECT_OT_apply_armature_transforms_normalize_fcurves)
+    bpy.utils.unregister_class(ACTIONS_OT_remove_action)
+    bpy.utils.unregister_class(ACTIONS_OT_add_action)
+    bpy.utils.unregister_class(ACTIONS_UL_actions_list)
+    bpy.utils.unregister_class(ACTIONS_OT_Item)
+    bpy.utils.unregister_class(MatchRigPose)
+    bpy.utils.unregister_class(RigConverter)
 
 
 if __name__ == "__main__":
