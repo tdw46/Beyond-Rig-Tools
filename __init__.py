@@ -12,7 +12,7 @@ from . import util_apply_rigobj_transform
 bl_info = {
     "name": "Beyond Rig Tools",
     "author": "Tyler Walker (Beyond Dev)",
-    "version": (1, 1, 6),
+    "version": (1, 1, 7),
     "blender": (2, 80, 0),
     "location": "Properties > Data > Armature",
     "description": "Tools for rig conversion and pose matching",
