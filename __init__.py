@@ -1,14 +1,18 @@
 import bpy
 import json
 import os
+import math
 import mathutils
 
 import blf
+import importlib
+
+from . import util_apply_rigobj_transform
 
 bl_info = {
     "name": "Beyond Rig Tools",
     "author": "Tyler Walker (Beyond Dev)",
-    "version": (1, 0),
+    "version": (1, 1, 6),
     "blender": (2, 80, 0),
     "location": "Properties > Data > Armature",
     "description": "Tools for rig conversion and pose matching",
@@ -300,6 +304,164 @@ class MatchRigPose(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class MapSelectedPoseBonesRotation(bpy.types.Operator):
+    bl_idname = "object.map_selected_pose_bones_rotation"
+    bl_label = "Normalize Selected Rotations"
+    bl_description = "Normalize selected pose bones' Euler rotations to the [-π, π] range per axis"
+
+    @classmethod
+    def poll(cls, context):
+        active_object = context.active_object
+        return active_object and active_object.type == "ARMATURE"
+
+    def map_rotation_to_neg2pi_2pi(self, rotation):
+        mapped = rotation % (2 * math.pi)
+        if mapped > math.pi:
+            mapped -= 2 * math.pi
+        return mapped
+
+    def execute(self, context):
+        armature = context.active_object
+        original_mode = armature.mode
+        bpy.ops.object.mode_set(mode="POSE")
+
+        selected_bones = bpy.context.selected_pose_bones
+        if not selected_bones:
+            self.report({"WARNING"}, "No pose bones selected")
+            bpy.ops.object.mode_set(mode=original_mode)
+            return {"CANCELLED"}
+
+        for bone in selected_bones:
+            current_rotation = bone.rotation_euler
+            mapped_rotation = [
+                self.map_rotation_to_neg2pi_2pi(rot) for rot in current_rotation
+            ]
+            bone.rotation_euler = mapped_rotation
+
+            print(f"Bone: {bone.name}")
+            print(f"  Original rotation: {[math.degrees(rot) for rot in current_rotation]}")
+            print(f"  Mapped rotation: {[math.degrees(rot) for rot in mapped_rotation]}")
+
+        context.view_layer.update()
+        bpy.ops.object.mode_set(mode=original_mode)
+        self.report({"INFO"}, "Normalized selected bone rotations to [-π, π]")
+        return {"FINISHED"}
+
+
+class ExportArmatureHierarchyJSON(bpy.types.Operator):
+    bl_idname = "object.export_armature_hierarchy_json"
+    bl_label = "Export Bone Hierarchy (JSON)"
+    bl_description = "Save the active armature's bone hierarchy to a JSON file in the current .blend directory"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE'
+
+    def execute(self, context):
+        obj = context.active_object
+        armature = obj.data
+        armature_name = obj.name
+
+        def recurse_bone(bone):
+            return {
+                "name": bone.name,
+                "children": [recurse_bone(child) for child in bone.children],
+            }
+
+        armature_hierarchy = [recurse_bone(b) for b in armature.bones if b.parent is None]
+
+        current_directory = os.path.dirname(bpy.data.filepath)
+        if not current_directory:
+            current_directory = os.getcwd()
+
+        output_filepath = os.path.join(current_directory, f"{armature_name}_bone-order.json")
+
+        try:
+            with open(output_filepath, "w", encoding="utf-8") as f:
+                json.dump(armature_hierarchy, f, indent=4)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to save hierarchy: {e}")
+            return {'CANCELLED'}
+
+        print(f"Armature hierarchy saved to {output_filepath}")
+        self.report({'INFO'}, f"Hierarchy saved to {output_filepath}")
+        return {'FINISHED'}
+
+
+class ToggleConstraintsPreserveState(bpy.types.Operator):
+    bl_idname = "object.toggle_constraints_preserve_state"
+    bl_label = "Toggle All Constraints"
+    bl_description = "Toggle all constraints off/on while preserving original enable states per constraint on this armature"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE'
+
+    def execute(self, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'ARMATURE':
+            self.report({'ERROR'}, 'Active object is not an armature')
+            return {'CANCELLED'}
+
+        snapshot_key = "brt_constraints_snapshot"
+        active_key = "brt_constraints_snapshot_active"
+
+        if obj.get(active_key):
+            try:
+                snapshot = json.loads(obj.get(snapshot_key, "{}"))
+            except Exception:
+                snapshot = {}
+
+            for pbone in obj.pose.bones:
+                bone_state = snapshot.get(pbone.name, {})
+                for c in pbone.constraints:
+                    c.enabled = bool(bone_state.get(c.name, False))
+
+            if snapshot_key in obj:
+                try:
+                    del obj[snapshot_key]
+                except Exception:
+                    obj[snapshot_key] = ""
+            obj[active_key] = False
+            context.view_layer.update()
+            self.report({'INFO'}, 'Constraints restored to saved state')
+            return {'FINISHED'}
+
+        snapshot = {}
+        for pbone in obj.pose.bones:
+            bone_state = {}
+            for c in pbone.constraints:
+                bone_state[c.name] = bool(c.enabled)
+            snapshot[pbone.name] = bone_state
+
+        obj[snapshot_key] = json.dumps(snapshot)
+        obj[active_key] = True
+
+        for pbone in obj.pose.bones:
+            for c in pbone.constraints:
+                c.enabled = False
+
+        context.view_layer.update()
+        self.report({'INFO'}, 'All constraints disabled; state saved')
+        return {'FINISHED'}
+
+
+def draw_brt_constraints_toggle(self, context):
+    layout = self.layout
+    layout.operator("object.toggle_constraints_preserve_state", icon="CONSTRAINT")
+
+
+def draw_brt_apply_menu(self, context):
+    layout = self.layout
+    layout.operator_context = 'INVOKE_DEFAULT'
+    layout.operator(
+        "object.transform_popup",
+        text="Apply Rig Object Transform + Fix Animations",
+        icon="ARMATURE_DATA",
+    )
+
 def rig_converter_target_items(self, context):
     items = [
         ("NONE", "None", "No conversion"),
@@ -427,6 +589,49 @@ def draw_beyond_rig_tools(self, context):
             row = tools_box.row()
             row.operator("object.match_rig_pose")
 
+        # Utilities section
+        utilities_box = main_box.box()
+        utilities_row = utilities_box.row()
+        utilities_row.prop(
+            scene,
+            "beyond_utilities_expand",
+            icon="TRIA_DOWN" if scene.beyond_utilities_expand else "TRIA_RIGHT",
+            icon_only=True,
+            emboss=False,
+        )
+        utilities_row.label(text="Utilities")
+
+        if scene.beyond_utilities_expand:
+            rotation_box = utilities_box.box()
+            rotation_row = rotation_box.row()
+            rotation_row.prop(
+                scene,
+                "beyond_utilities_rotation_expand",
+                icon="TRIA_DOWN" if scene.beyond_utilities_rotation_expand else "TRIA_RIGHT",
+                icon_only=True,
+                emboss=False,
+            )
+            rotation_row.label(text="Rotation")
+
+            if scene.beyond_utilities_rotation_expand:
+                row = rotation_box.row()
+                row.operator("object.map_selected_pose_bones_rotation")
+
+            data_box = utilities_box.box()
+            data_row = data_box.row()
+            data_row.prop(
+                scene,
+                "beyond_utilities_data_expand",
+                icon="TRIA_DOWN" if scene.beyond_utilities_data_expand else "TRIA_RIGHT",
+                icon_only=True,
+                emboss=False,
+            )
+            data_row.label(text="Data")
+
+            if scene.beyond_utilities_data_expand:
+                row = data_box.row()
+                row.operator("object.export_armature_hierarchy_json")
+
 
 def update_rig_converter_target(self, context):
     # This function is intentionally left empty to avoid the infinite recursion error
@@ -436,6 +641,24 @@ def update_rig_converter_target(self, context):
 def register():
     bpy.utils.register_class(RigConverter)
     bpy.utils.register_class(MatchRigPose)
+    bpy.utils.register_class(MapSelectedPoseBonesRotation)
+    bpy.utils.register_class(ExportArmatureHierarchyJSON)
+    bpy.utils.register_class(ToggleConstraintsPreserveState)
+    try:
+        bpy.types.BONE_PT_constraints.prepend(draw_brt_constraints_toggle)
+    except Exception:
+        pass
+
+    try:
+        importlib.reload(util_apply_rigobj_transform)
+    except Exception:
+        pass
+    util_apply_rigobj_transform.register()
+
+    try:
+        bpy.types.VIEW3D_MT_object_apply.prepend(draw_brt_apply_menu)
+    except Exception:
+        pass
 
     bpy.types.Scene.beyond_rig_tools_main_expand = bpy.props.BoolProperty(
         name="Expand Beyond Rig Tools",
@@ -450,6 +673,22 @@ def register():
     bpy.types.Scene.beyond_rig_tools_expand = bpy.props.BoolProperty(
         name="Expand Beyond Rig Tools",
         description="Expand or collapse the Beyond Rig Tools section",
+        default=False,
+    )
+
+    bpy.types.Scene.beyond_utilities_expand = bpy.props.BoolProperty(
+        name="Expand Utilities",
+        description="Expand or collapse the Utilities section",
+        default=False,
+    )
+    bpy.types.Scene.beyond_utilities_rotation_expand = bpy.props.BoolProperty(
+        name="Expand Utilities Rotation",
+        description="Expand or collapse the Utilities Rotation subsection",
+        default=True,
+    )
+    bpy.types.Scene.beyond_utilities_data_expand = bpy.props.BoolProperty(
+        name="Expand Utilities Data",
+        description="Expand or collapse the Utilities Data subsection",
         default=False,
     )
 
@@ -471,11 +710,28 @@ def register():
 def unregister():
     bpy.utils.unregister_class(RigConverter)
     bpy.utils.unregister_class(MatchRigPose)
+    bpy.utils.unregister_class(MapSelectedPoseBonesRotation)
+    bpy.utils.unregister_class(ExportArmatureHierarchyJSON)
+    try:
+        bpy.types.BONE_PT_constraints.remove(draw_brt_constraints_toggle)
+    except Exception:
+        pass
+    bpy.utils.unregister_class(ToggleConstraintsPreserveState)
+
+    util_apply_rigobj_transform.unregister()
+
+    try:
+        bpy.types.VIEW3D_MT_object_apply.remove(draw_brt_apply_menu)
+    except Exception:
+        pass
 
     del bpy.types.Scene.rig_converter_target
     del bpy.types.Scene.beyond_rig_tools_main_expand
     del bpy.types.Scene.beyond_rig_converter_expand
     del bpy.types.Scene.beyond_rig_tools_expand
+    del bpy.types.Scene.beyond_utilities_expand
+    del bpy.types.Scene.beyond_utilities_rotation_expand
+    del bpy.types.Scene.beyond_utilities_data_expand
 
     # Remove the draw function from the armature properties panel
     bpy.types.DATA_PT_bone_collections.remove(draw_beyond_rig_tools)
