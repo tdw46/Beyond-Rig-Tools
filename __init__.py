@@ -659,6 +659,7 @@ def register():
         bpy.types.VIEW3D_MT_object_apply.prepend(draw_brt_apply_menu)
     except Exception:
         pass
+    bpy.types.WindowManager.action_index = bpy.props.IntProperty()
 
     bpy.types.Scene.beyond_rig_tools_main_expand = bpy.props.BoolProperty(
         name="Expand Beyond Rig Tools",
@@ -735,6 +736,9 @@ def unregister():
 
     # Remove the draw function from the armature properties panel
     bpy.types.DATA_PT_bone_collections.remove(draw_beyond_rig_tools)
+
+    bpy.utils.unregister_class(MatchRigPose)
+    bpy.utils.unregister_class(RigConverter)
 
 
 if __name__ == "__main__":
