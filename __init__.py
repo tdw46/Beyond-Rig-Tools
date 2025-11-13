@@ -12,7 +12,7 @@ from . import util_apply_rigobj_transform
 bl_info = {
     "name": "Beyond Rig Tools",
     "author": "Tyler Walker (Beyond Dev)",
-    "version": (1, 1, 7),
+    "version": (1, 2, 0),
     "blender": (2, 80, 0),
     "location": "Properties > Data > Armature",
     "description": "Tools for rig conversion and pose matching",
@@ -462,6 +462,143 @@ def draw_brt_apply_menu(self, context):
         icon="ARMATURE_DATA",
     )
 
+class FixRigRemoveDuplicateDrivers(bpy.types.Operator):
+    bl_idname = "object.fix_rig_remove_duplicate_drivers"
+    bl_label = "Remove Duplicate Drivers"
+
+    def execute(self, context):
+        removed_count = 0
+        armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+        for arm in armatures:
+            if arm.animation_data and arm.animation_data.drivers:
+                driver_map = {}
+                for dr in list(arm.animation_data.drivers):
+                    key = f"{dr.data_path}[{dr.array_index}]"
+                    driver_map.setdefault(key, []).append(dr)
+                for key, drs in driver_map.items():
+                    if len(drs) > 1:
+                        for dr in drs[1:]:
+                            arm.driver_remove(dr.data_path, dr.array_index)
+                            removed_count += 1
+        context.view_layer.update()
+        self.report({"INFO"}, f"Removed {removed_count} duplicate drivers")
+        return {"FINISHED"}
+
+
+def is_invalid_driver(driver):
+    if not driver or not driver.variables:
+        return True
+    for var in driver.variables:
+        if not var.targets or len(var.targets) == 0 or var.targets[0].id is None:
+            return True
+    if not driver.expression or driver.expression.strip() in ("", "var", "1-var"):
+        return True
+    return False
+
+
+class FixRigRemoveInvalidDrivers(bpy.types.Operator):
+    bl_idname = "object.fix_rig_remove_invalid_drivers"
+    bl_label = "Remove Invalid Drivers"
+
+    def execute(self, context):
+        removed_count = 0
+        armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+        for arm in armatures:
+            if arm.animation_data and arm.animation_data.drivers:
+                to_remove = []
+                for fcu in arm.animation_data.drivers:
+                    if is_invalid_driver(fcu.driver):
+                        to_remove.append((fcu.data_path, fcu.array_index))
+                for data_path, array_index in to_remove:
+                    arm.driver_remove(data_path, array_index)
+                    removed_count += 1
+        context.view_layer.update()
+        self.report({"INFO"}, f"Removed {removed_count} invalid drivers")
+        return {"FINISHED"}
+
+
+class FixRigClearConstraintInfluenceDrivers(bpy.types.Operator):
+    bl_idname = "object.fix_rig_clear_constraint_influence_drivers"
+    bl_label = "Clear Constraint Influence Drivers"
+
+    def execute(self, context):
+        removed_count = 0
+        armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+        original_active = bpy.context.view_layer.objects.active
+        original_mode = original_active.mode if original_active else None
+        for arm in armatures:
+            bpy.context.view_layer.objects.active = arm
+            try:
+                bpy.ops.object.mode_set(mode="POSE")
+            except Exception:
+                pass
+            for bone in arm.pose.bones:
+                for constr in bone.constraints:
+                    try:
+                        data_path = f'pose.bones["{bone.name}"].constraints["{constr.name}"].influence'
+                        arm.driver_remove(data_path)
+                        constr.influence = 1.0
+                        removed_count += 1
+                    except Exception:
+                        pass
+        if original_active:
+            bpy.context.view_layer.objects.active = original_active
+            if original_mode:
+                try:
+                    bpy.ops.object.mode_set(mode=original_mode)
+                except Exception:
+                    pass
+        context.view_layer.update()
+        self.report({"INFO"}, f"Cleared {removed_count} constraint influence drivers")
+        return {"FINISHED"}
+
+
+class FixRigRemoveProblematicBoneDrivers(bpy.types.Operator):
+    bl_idname = "object.fix_rig_remove_problematic_bone_drivers"
+    bl_label = "Remove Scale/Custom Shape Drivers"
+
+    def execute(self, context):
+        removed_count = 0
+        armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+        for arm in armatures:
+            if arm.animation_data and arm.animation_data.drivers:
+                to_remove = []
+                for fcu in arm.animation_data.drivers:
+                    dp = fcu.data_path
+                    if ".scale" in dp or "custom_shape_scale_xyz" in dp:
+                        to_remove.append((dp, fcu.array_index))
+                for data_path, array_index in to_remove:
+                    arm.driver_remove(data_path, array_index)
+                    removed_count += 1
+        context.view_layer.update()
+        self.report({"INFO"}, f"Removed {removed_count} bone scale/custom shape drivers")
+        return {"FINISHED"}
+
+
+class FixRigCleanShapeKeyDrivers(bpy.types.Operator):
+    bl_idname = "object.fix_rig_clean_shape_key_drivers"
+    bl_label = "Clean Shape Key Drivers"
+
+    def execute(self, context):
+        removed_count = 0
+        for obj in bpy.data.objects:
+            if obj.type == "MESH" and obj.data and obj.data.shape_keys:
+                sk = obj.data.shape_keys
+                ad = sk.animation_data
+                if ad and ad.drivers:
+                    to_remove = []
+                    for fcu in ad.drivers:
+                        if fcu.data_path.startswith('key_blocks[') and fcu.data_path.endswith('].value'):
+                            if is_invalid_driver(fcu.driver):
+                                to_remove.append((fcu.data_path, fcu.array_index))
+                    for data_path, array_index in to_remove:
+                        sk.driver_remove(data_path, array_index)
+                        removed_count += 1
+        context.view_layer.update()
+        self.report({"INFO"}, f"Removed {removed_count} invalid shape key drivers")
+        return {"FINISHED"}
+
+
 def rig_converter_target_items(self, context):
     items = [
         ("NONE", "None", "No conversion"),
@@ -589,6 +726,42 @@ def draw_beyond_rig_tools(self, context):
             row = tools_box.row()
             row.operator("object.match_rig_pose")
 
+        # Fix Rig section
+        fix_box = main_box.box()
+        fix_row = fix_box.row()
+        fix_row.prop(
+            scene,
+            "beyond_fix_rig_expand",
+            icon="TRIA_DOWN" if scene.beyond_fix_rig_expand else "TRIA_RIGHT",
+            icon_only=True,
+            emboss=False,
+        )
+        fix_row.label(text="Fix Rig")
+
+        if scene.beyond_fix_rig_expand:
+            warn_col = fix_box.column()
+            warn_col.alert = True
+            draw_wrapped_text(
+                warn_col,
+                "Fixes common rig warnings and circular dependencies by cleaning duplicate/invalid drivers, clearing constraint influence drivers, and removing problematic bone/shape key drivers.",
+                available_width,
+            )
+
+            row = fix_box.row()
+            row.operator("object.fix_rig_remove_duplicate_drivers")
+
+            row = fix_box.row()
+            row.operator("object.fix_rig_remove_invalid_drivers")
+
+            row = fix_box.row()
+            row.operator("object.fix_rig_clear_constraint_influence_drivers")
+
+            row = fix_box.row()
+            row.operator("object.fix_rig_remove_problematic_bone_drivers")
+
+            row = fix_box.row()
+            row.operator("object.fix_rig_clean_shape_key_drivers")
+
         # Utilities section
         utilities_box = main_box.box()
         utilities_row = utilities_box.row()
@@ -644,6 +817,11 @@ def register():
     bpy.utils.register_class(MapSelectedPoseBonesRotation)
     bpy.utils.register_class(ExportArmatureHierarchyJSON)
     bpy.utils.register_class(ToggleConstraintsPreserveState)
+    bpy.utils.register_class(FixRigRemoveDuplicateDrivers)
+    bpy.utils.register_class(FixRigRemoveInvalidDrivers)
+    bpy.utils.register_class(FixRigClearConstraintInfluenceDrivers)
+    bpy.utils.register_class(FixRigRemoveProblematicBoneDrivers)
+    bpy.utils.register_class(FixRigCleanShapeKeyDrivers)
     try:
         bpy.types.BONE_PT_constraints.prepend(draw_brt_constraints_toggle)
     except Exception:
@@ -674,6 +852,11 @@ def register():
     bpy.types.Scene.beyond_rig_tools_expand = bpy.props.BoolProperty(
         name="Expand Beyond Rig Tools",
         description="Expand or collapse the Beyond Rig Tools section",
+        default=False,
+    )
+    bpy.types.Scene.beyond_fix_rig_expand = bpy.props.BoolProperty(
+        name="Expand Fix Rig",
+        description="Expand or collapse the Fix Rig section",
         default=False,
     )
 
@@ -718,6 +901,11 @@ def unregister():
     except Exception:
         pass
     bpy.utils.unregister_class(ToggleConstraintsPreserveState)
+    bpy.utils.unregister_class(FixRigCleanShapeKeyDrivers)
+    bpy.utils.unregister_class(FixRigRemoveProblematicBoneDrivers)
+    bpy.utils.unregister_class(FixRigClearConstraintInfluenceDrivers)
+    bpy.utils.unregister_class(FixRigRemoveInvalidDrivers)
+    bpy.utils.unregister_class(FixRigRemoveDuplicateDrivers)
 
     util_apply_rigobj_transform.unregister()
 
@@ -726,19 +914,33 @@ def unregister():
     except Exception:
         pass
 
-    del bpy.types.Scene.rig_converter_target
-    del bpy.types.Scene.beyond_rig_tools_main_expand
-    del bpy.types.Scene.beyond_rig_converter_expand
-    del bpy.types.Scene.beyond_rig_tools_expand
-    del bpy.types.Scene.beyond_utilities_expand
-    del bpy.types.Scene.beyond_utilities_rotation_expand
-    del bpy.types.Scene.beyond_utilities_data_expand
+    # Safely remove scene properties
+    for attr in (
+        "rig_converter_target",
+        "beyond_rig_tools_main_expand",
+        "beyond_rig_converter_expand",
+        "beyond_rig_tools_expand",
+        "beyond_fix_rig_expand",
+        "beyond_utilities_expand",
+        "beyond_utilities_rotation_expand",
+        "beyond_utilities_data_expand",
+        "source_armature",
+    ):
+        try:
+            delattr(bpy.types.Scene, attr)
+        except Exception:
+            pass
+
+    try:
+        del bpy.types.WindowManager.action_index
+    except Exception:
+        pass
 
     # Remove the draw function from the armature properties panel
-    bpy.types.DATA_PT_bone_collections.remove(draw_beyond_rig_tools)
-
-    bpy.utils.unregister_class(MatchRigPose)
-    bpy.utils.unregister_class(RigConverter)
+    try:
+        bpy.types.DATA_PT_bone_collections.remove(draw_beyond_rig_tools)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
