@@ -1,4 +1,5 @@
 import bpy
+import csv
 import json
 import os
 import math
@@ -348,44 +349,180 @@ class MapSelectedPoseBonesRotation(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class ExportArmatureHierarchyJSON(bpy.types.Operator):
+class ExportArmatureHierarchyCSV(bpy.types.Operator):
     bl_idname = "object.export_armature_hierarchy_json"
-    bl_label = "Export Bone Hierarchy (JSON)"
-    bl_description = "Save the active armature's bone hierarchy to a JSON file in the current .blend directory"
+    bl_label = "Export Bone Hierarchy (CSV)"
+    bl_description = "Save the active armature's bone hierarchy and constraint targets to a CSV file in the current .blend directory"
 
     @classmethod
     def poll(cls, context):
         obj = context.active_object
         return obj is not None and obj.type == 'ARMATURE'
 
+    @staticmethod
+    def _iter_bones_in_hierarchy(armature):
+        order = 0
+
+        def visit(bone, depth, lineage):
+            nonlocal order
+            order += 1
+            path = lineage + [bone.name]
+            yield order, bone, depth, path
+            for child in bone.children:
+                yield from visit(child, depth + 1, path)
+
+        for root_bone in armature.bones:
+            if root_bone.parent is None:
+                yield from visit(root_bone, 0, [])
+
+    @staticmethod
+    def _format_constraint_targets(constraint):
+        entries = []
+        seen = set()
+
+        def add_target(role, target_obj=None, subtarget=""):
+            object_name = getattr(target_obj, "name", "") if target_obj else ""
+            bone_name = subtarget or ""
+            if not object_name and not bone_name:
+                return
+
+            key = (role, object_name, bone_name)
+            if key in seen:
+                return
+            seen.add(key)
+
+            target_label = object_name or ""
+            if bone_name:
+                target_label = f"{target_label}:{bone_name}" if target_label else bone_name
+
+            entries.append(
+                {
+                    "role": role,
+                    "object": object_name,
+                    "bone": bone_name,
+                    "label": f"{role}={target_label}" if target_label else role,
+                }
+            )
+
+        for target_attr, subtarget_attr in (
+            ("target", "subtarget"),
+            ("pole_target", "pole_subtarget"),
+            ("space_object", "space_subtarget"),
+        ):
+            add_target(
+                target_attr,
+                getattr(constraint, target_attr, None),
+                getattr(constraint, subtarget_attr, ""),
+            )
+
+        for index, target in enumerate(getattr(constraint, "targets", []), start=1):
+            add_target(
+                f"targets[{index}]",
+                getattr(target, "target", None),
+                getattr(target, "subtarget", ""),
+            )
+
+        return {
+            "roles": "; ".join(entry["role"] for entry in entries),
+            "objects": "; ".join(entry["object"] for entry in entries if entry["object"]),
+            "bones": "; ".join(entry["bone"] for entry in entries if entry["bone"]),
+            "summary": "; ".join(entry["label"] for entry in entries),
+        }
+
     def execute(self, context):
         obj = context.active_object
         armature = obj.data
         armature_name = obj.name
+        rows = []
 
-        def recurse_bone(bone):
-            return {
-                "name": bone.name,
-                "children": [recurse_bone(child) for child in bone.children],
+        for bone_order, bone, depth, bone_path in self._iter_bones_in_hierarchy(armature):
+            pose_bone = obj.pose.bones.get(bone.name)
+            constraints = list(pose_bone.constraints) if pose_bone else []
+            base_row = {
+                "bone_order": bone_order,
+                "bone_name": bone.name,
+                "bone_path": " > ".join(bone_path),
+                "parent_bone": bone.parent.name if bone.parent else "",
+                "depth": depth,
+                "is_connected": bone.use_connect,
+                "deform": bone.use_deform,
+                "child_count": len(bone.children),
+                "children": "; ".join(child.name for child in bone.children),
             }
 
-        armature_hierarchy = [recurse_bone(b) for b in armature.bones if b.parent is None]
+            if not constraints:
+                rows.append(
+                    {
+                        **base_row,
+                        "constraint_index": "",
+                        "constraint_name": "",
+                        "constraint_type": "",
+                        "constraint_enabled": "",
+                        "constraint_influence": "",
+                        "constraint_target_roles": "",
+                        "constraint_target_objects": "",
+                        "constraint_target_bones": "",
+                        "constraint_targets": "",
+                    }
+                )
+                continue
+
+            for constraint_index, constraint in enumerate(constraints, start=1):
+                target_info = self._format_constraint_targets(constraint)
+                rows.append(
+                    {
+                        **base_row,
+                        "constraint_index": constraint_index,
+                        "constraint_name": constraint.name,
+                        "constraint_type": constraint.type,
+                        "constraint_enabled": getattr(constraint, "enabled", not constraint.mute),
+                        "constraint_influence": constraint.influence,
+                        "constraint_target_roles": target_info["roles"],
+                        "constraint_target_objects": target_info["objects"],
+                        "constraint_target_bones": target_info["bones"],
+                        "constraint_targets": target_info["summary"],
+                    }
+                )
 
         current_directory = os.path.dirname(bpy.data.filepath)
         if not current_directory:
             current_directory = os.getcwd()
 
-        output_filepath = os.path.join(current_directory, f"{armature_name}_bone-order.json")
+        output_filepath = os.path.join(current_directory, f"{armature_name}_bone-order.csv")
 
         try:
-            with open(output_filepath, "w", encoding="utf-8") as f:
-                json.dump(armature_hierarchy, f, indent=4)
+            with open(output_filepath, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "bone_order",
+                        "bone_name",
+                        "bone_path",
+                        "parent_bone",
+                        "depth",
+                        "is_connected",
+                        "deform",
+                        "child_count",
+                        "children",
+                        "constraint_index",
+                        "constraint_name",
+                        "constraint_type",
+                        "constraint_enabled",
+                        "constraint_influence",
+                        "constraint_target_roles",
+                        "constraint_target_objects",
+                        "constraint_target_bones",
+                        "constraint_targets",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(rows)
         except Exception as e:
             self.report({'ERROR'}, f"Failed to save hierarchy: {e}")
             return {'CANCELLED'}
 
-        print(f"Armature hierarchy saved to {output_filepath}")
-        self.report({'INFO'}, f"Hierarchy saved to {output_filepath}")
+        print(f"Armature hierarchy CSV saved to {output_filepath}")
+        self.report({'INFO'}, f"Hierarchy CSV saved to {output_filepath}")
         return {'FINISHED'}
 
 
@@ -815,7 +952,7 @@ def register():
     bpy.utils.register_class(RigConverter)
     bpy.utils.register_class(MatchRigPose)
     bpy.utils.register_class(MapSelectedPoseBonesRotation)
-    bpy.utils.register_class(ExportArmatureHierarchyJSON)
+    bpy.utils.register_class(ExportArmatureHierarchyCSV)
     bpy.utils.register_class(ToggleConstraintsPreserveState)
     bpy.utils.register_class(FixRigRemoveDuplicateDrivers)
     bpy.utils.register_class(FixRigRemoveInvalidDrivers)
@@ -895,7 +1032,7 @@ def unregister():
     bpy.utils.unregister_class(RigConverter)
     bpy.utils.unregister_class(MatchRigPose)
     bpy.utils.unregister_class(MapSelectedPoseBonesRotation)
-    bpy.utils.unregister_class(ExportArmatureHierarchyJSON)
+    bpy.utils.unregister_class(ExportArmatureHierarchyCSV)
     try:
         bpy.types.BONE_PT_constraints.remove(draw_brt_constraints_toggle)
     except Exception:
